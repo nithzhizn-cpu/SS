@@ -1,59 +1,31 @@
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from database import SessionLocal
-from models import User, Message
-from schemas import SendMessageRequest
-import secrets
+from database import get_db
+import models, schemas
+from datetime import datetime, timedelta
 
 router = APIRouter()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+@router.post("/messages")
+def send_message(msg: schemas.MessageCreate,
+                 current=Depends(models.get_current_user),
+                 db: Session = Depends(get_db)):
+    
+    peer = db.query(models.User).filter(models.User.id == msg.to).first()
 
+    if not peer:
+        raise HTTPException(404, "Recipient not found")
 
-def auth_user(db: Session, token: str):
-    return db.query(User).filter(User.token == token).first()
-
-
-@router.post("/api/messages")
-def send_message(req: SendMessageRequest, Authorization: str = Header(...), db: Session = Depends(get_db)):
-    user = auth_user(db, Authorization.replace("Bearer ", ""))
-    if not user:
-        return {"error": "invalid token"}
-
-    message = Message(
-        from_id=user.id,
-        to_id=req.to,
-        iv=req.iv,
-        ciphertext=req.ciphertext,
+    db_msg = models.Message(
+        from_id=current.id,
+        to_id=peer.id,
+        iv=msg.iv,
+        ciphertext=msg.ciphertext,
+        msg_type=msg.msg_type,
+        ttl_sec=msg.ttl_sec
     )
-    db.add(message)
+    db.add(db_msg)
     db.commit()
-    return {"status": "ok"}
+    db.refresh(db_msg)
 
-
-@router.get("/api/messages")
-def get_messages(peer_id: int, Authorization: str = Header(...), db: Session = Depends(get_db)):
-    user = auth_user(db, Authorization.replace("Bearer ", ""))
-    if not user:
-        return {"messages": []}
-
-    msgs = db.query(Message).filter(
-        ((Message.from_id == user.id) & (Message.to_id == peer_id)) |
-        ((Message.from_id == peer_id) & (Message.to_id == user.id))
-    ).order_by(Message.created_at).all()
-
-    return {"messages": [
-        {
-            "from_id": m.from_id,
-            "to": m.to_id,
-            "iv": m.iv,
-            "ciphertext": m.ciphertext,
-            "created_at": m.created_at
-        }
-        for m in msgs
-    ]}
+    return {"ok": True, "id": db_msg.id}
